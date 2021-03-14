@@ -545,7 +545,7 @@ func (g *Goproxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			moduleVersion,
 		)
 		if err != nil {
-			g.logError(err)
+			g.logError(fmt.Errorf("download: %w", err))
 			responseModError(rw, err, false)
 			return
 		}

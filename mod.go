@@ -46,12 +46,12 @@ func (g *Goproxy) mod(
 
 	escapedModulePath, err := module.EscapePath(modulePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("escape path: %w", err)
 	}
 
 	escapedModuleVersion, err := module.EscapeVersion(moduleVersion)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("escape module version: %w", err)
 	}
 
 	// Try proxies.
@@ -112,21 +112,32 @@ func (g *Goproxy) mod(
 					"@latest",
 				)
 			}
-
 			var buf bytes.Buffer
-			if err := httpGet(
-				ctx,
-				g.httpClient,
-				operationURL.String(),
-				&buf,
-			); err != nil {
-				if fallBackOnError ||
-					errors.Is(err, errNotFound) {
-					proxyError = err
-					continue
+			switch proxyURL.Scheme {
+			case "file":
+				bs, err := os.ReadFile(operationURL.Path)
+				if err != nil {
+					if _, ok := err.(*os.PathError); ok || fallBackOnError {
+						proxyError = err
+						continue
+					}
 				}
+				buf.Write(bs)
+			case "http", "https":
+				if err := httpGet(
+					ctx,
+					g.httpClient,
+					operationURL.String(),
+					&buf,
+				); err != nil {
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
+					return nil, err
+				}
 			}
 
 			mr := modResult{}
@@ -150,24 +161,37 @@ func (g *Goproxy) mod(
 			return &mr, nil
 		case "list":
 			var buf bytes.Buffer
-			if err := httpGet(
-				ctx,
-				g.httpClient,
-				appendURL(
-					proxyURL,
-					escapedModulePath,
-					"@v",
-					"list",
-				).String(),
-				&buf,
-			); err != nil {
-				if fallBackOnError ||
-					errors.Is(err, errNotFound) {
-					proxyError = err
-					continue
+			operationURL := appendURL(
+				proxyURL,
+				escapedModulePath,
+				"@v",
+				"list",
+			)
+			switch proxyURL.Scheme {
+			case "file":
+				if _, err := os.Stat(operationURL.Path); os.IsNotExist(err) {
+					// fallback to latest
+					return g.mod(ctx, "latest", goproxyRoot, modulePath, moduleVersion)
 				}
-
-				return nil, err
+				bs, err := os.ReadFile(operationURL.Path)
+				if err != nil {
+					return nil, err
+				}
+				buf.Write(bs)
+			case "http", "https":
+				if err := httpGet(
+					ctx,
+					g.httpClient,
+					operationURL.String(),
+					&buf,
+				); err != nil {
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
+					return nil, err
+				}
 			}
 
 			mr := modResult{}
@@ -186,38 +210,53 @@ func (g *Goproxy) mod(
 
 			return &mr, nil
 		case "download":
-			infoFile, err := ioutil.TempFile(goproxyRoot, "info")
-			if err != nil {
-				if fallBackOnError {
-					proxyError = err
-					continue
+			operationURL := appendURL(
+				proxyURL,
+				escapedModulePath,
+				"@v",
+				fmt.Sprint(
+					escapedModuleVersion,
+					".info",
+				),
+			)
+
+			var infoFile *os.File
+			switch proxyURL.Scheme {
+			case "file":
+				infoFile, err = os.Open(operationURL.Path)
+				if err != nil {
+					infoFile.Close()
+					if fallBackOnError {
+						proxyError = fmt.Errorf("download: file: %w", err)
+						continue
+					}
+					return nil, fmt.Errorf("download: file: open: %w", err)
 				}
+			case "http", "https":
+				infoFile, err = ioutil.TempFile(goproxyRoot, "info")
+				if err != nil {
+					if fallBackOnError {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
-			}
-
-			if err := httpGet(
-				ctx,
-				g.httpClient,
-				appendURL(
-					proxyURL,
-					escapedModulePath,
-					"@v",
-					fmt.Sprint(
-						escapedModuleVersion,
-						".info",
-					),
-				).String(),
-				infoFile,
-			); err != nil {
-				infoFile.Close()
-				if fallBackOnError ||
-					errors.Is(err, errNotFound) {
-					proxyError = err
-					continue
+					return nil, err
 				}
+				if err := httpGet(
+					ctx,
+					g.httpClient,
+					operationURL.String(),
+					infoFile,
+				); err != nil {
+					infoFile.Close()
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
+					return nil, err
+				}
 			}
 
 			if err := infoFile.Close(); err != nil {
@@ -232,11 +271,11 @@ func (g *Goproxy) mod(
 			if err := checkInfoFile(infoFile.Name()); err != nil {
 				if fallBackOnError ||
 					errors.Is(err, errNotFound) {
-					proxyError = err
+					proxyError = fmt.Errorf("download: info: %w", err)
 					continue
 				}
 
-				return nil, err
+				return nil, fmt.Errorf("download: info: check: %w", err)
 			}
 
 			if _, err := formatInfoFile(
@@ -244,47 +283,77 @@ func (g *Goproxy) mod(
 				"",
 			); err != nil {
 				if fallBackOnError {
-					proxyError = err
+					proxyError = fmt.Errorf("download: info: format: %w", err)
 					continue
 				}
 
-				return nil, err
+				return nil, fmt.Errorf("download: info: format: %w", err)
 			}
-
-			modFile, err := ioutil.TempFile(goproxyRoot, "mod")
-			if err != nil {
-				if fallBackOnError {
-					proxyError = err
-					continue
+			// mod
+			operationURL = appendURL(
+				proxyURL,
+				escapedModulePath,
+				"@v",
+				fmt.Sprint(
+					escapedModuleVersion,
+					".mod",
+				),
+			)
+			var modFile *os.File
+			switch proxyURL.Scheme {
+			case "file":
+				if _, err := os.Stat(operationURL.Path); os.IsNotExist(err) {
+					// per ref , proxy server should always requested version
+					// https://golang.org/ref/mod#goproxy-protocol
+					//  > If the module does not have a go.mod file at the requested version, a file containing only a module statement with the requested module path must be returned
+					modFile, err = ioutil.TempFile(goproxyRoot, "mod")
+					if err != nil {
+						if fallBackOnError {
+							proxyError = err
+							continue
+						}
+						return nil, err
+					}
+					_, err = modFile.WriteString("module " + modulePath)
+					if err != nil {
+						return nil, fmt.Errorf("download: on module file not found: %w", err)
+					}
+				} else {
+					modFile, err = os.Open(operationURL.Path)
+					if err != nil {
+						if fallBackOnError {
+							proxyError = err
+							continue
+						}
+						return nil, fmt.Errorf("download: mod: %w", err)
+					}
 				}
+			case "http", "https":
+				modFile, err = ioutil.TempFile(goproxyRoot, "mod")
+				if err != nil {
+					if fallBackOnError {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
-			}
-
-			if err := httpGet(
-				ctx,
-				g.httpClient,
-				appendURL(
-					proxyURL,
-					escapedModulePath,
-					"@v",
-					fmt.Sprint(
-						escapedModuleVersion,
-						".mod",
-					),
-				).String(),
-				modFile,
-			); err != nil {
-				modFile.Close()
-				if fallBackOnError ||
-					errors.Is(err, errNotFound) {
-					proxyError = err
-					continue
+					return nil, err
 				}
+				if err := httpGet(
+					ctx,
+					g.httpClient,
+					operationURL.String(),
+					modFile,
+				); err != nil {
+					modFile.Close()
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
+					return nil, err
+				}
 			}
-
 			if err := modFile.Close(); err != nil {
 				if fallBackOnError {
 					proxyError = err
@@ -304,38 +373,52 @@ func (g *Goproxy) mod(
 				return nil, err
 			}
 
-			zipFile, err := ioutil.TempFile(goproxyRoot, "zip")
-			if err != nil {
-				if fallBackOnError {
-					proxyError = err
-					continue
+			operationURL = appendURL(
+				proxyURL,
+				escapedModulePath,
+				"@v",
+				fmt.Sprint(
+					escapedModuleVersion,
+					".zip",
+				),
+			)
+			var zipFile *os.File
+			switch proxyURL.Scheme {
+			case "file":
+				zipFile, err = os.Open(operationURL.Path)
+				if err != nil {
+					zipFile.Close()
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
 				}
+			case "http", "https":
+				zipFile, err := ioutil.TempFile(goproxyRoot, "zip")
+				if err != nil {
+					if fallBackOnError {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
-			}
-
-			if err := httpGet(
-				ctx,
-				g.httpClient,
-				appendURL(
-					proxyURL,
-					escapedModulePath,
-					"@v",
-					fmt.Sprint(
-						escapedModuleVersion,
-						".zip",
-					),
-				).String(),
-				zipFile,
-			); err != nil {
-				zipFile.Close()
-				if fallBackOnError ||
-					errors.Is(err, errNotFound) {
-					proxyError = err
-					continue
+					return nil, err
 				}
+				if err := httpGet(
+					ctx,
+					g.httpClient,
+					operationURL.String(),
+					zipFile,
+				); err != nil {
+					zipFile.Close()
+					if fallBackOnError ||
+						errors.Is(err, errNotFound) {
+						proxyError = err
+						continue
+					}
 
-				return nil, err
+					return nil, err
+				}
 			}
 
 			if err := zipFile.Close(); err != nil {
@@ -354,11 +437,11 @@ func (g *Goproxy) mod(
 			); err != nil {
 				if fallBackOnError ||
 					errors.Is(err, errNotFound) {
-					proxyError = err
+					proxyError = fmt.Errorf("download: zip: validation: %w", err)
 					continue
 				}
 
-				return nil, err
+				return nil, fmt.Errorf("download: zip: validation: %w", err)
 			}
 
 			return &modResult{

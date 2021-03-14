@@ -93,10 +93,10 @@ func parseRawURL(rawURL string) (*url.URL, error) {
 	}
 
 	switch strings.ToLower(u.Scheme) {
-	case "http", "https":
+	case "http", "https", "file":
 	default:
 		return nil, fmt.Errorf(
-			"invalid URL scheme (must be http or https): %s",
+			"Per go mod ref, the proxy url must be http or https or file: %s",
 			redactedURL(u),
 		)
 	}
@@ -104,7 +104,7 @@ func parseRawURL(rawURL string) (*url.URL, error) {
 	return u, nil
 }
 
-// appendURL appends the extraPaths to the u safely and reutrns a new instance
+// appendURL appends the extraPaths to the u safely and returns a new instance
 // of the `url.URL`.
 func appendURL(u *url.URL, extraPaths ...string) *url.URL {
 	nu := *u
