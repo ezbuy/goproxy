@@ -154,7 +154,7 @@ type Goproxy struct {
 func New() *Goproxy {
 	return &Goproxy{
 		GoBinName:         "go",
-		GoBinEnv:          os.Environ(),
+		GoBinEnv:          moduleEnv(),
 		GoBinFetchTimeout: time.Minute,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
@@ -174,6 +174,16 @@ func New() *Goproxy {
 		},
 		goBinEnv:      map[string]string{},
 		proxiedSUMDBs: map[string]string{},
+	}
+}
+
+func moduleEnv() []string {
+	return []string{
+		os.Getenv("GOPROXY"),
+		os.Getenv("GONOPROXY"),
+		os.Getenv("GOSUMDB"),
+		os.Getenv("GONOSUMDB"),
+		os.Getenv("GOPRIVATE"),
 	}
 }
 
