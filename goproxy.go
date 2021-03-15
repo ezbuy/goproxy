@@ -147,12 +147,24 @@ type Goproxy struct {
 	proxiedSUMDBs   map[string]string
 }
 
+type option struct {
+	discardEnv bool
+}
+
+type Option func(*option)
+
+func DiscardOSEnv() Option {
+	return func(o *option) {
+		o.discardEnv = true
+	}
+}
+
 // New returns a new instance of the `Goproxy` with default field values.
 //
 // The `New` is the only function that creates new instances of the `Goproxy`
 // and keeps everything working.
-func New() *Goproxy {
-	return &Goproxy{
+func New(options ...Option) *Goproxy {
+	gp := &Goproxy{
 		GoBinName:         "go",
 		GoBinEnv:          moduleEnv(),
 		GoBinFetchTimeout: time.Minute,
@@ -175,15 +187,23 @@ func New() *Goproxy {
 		goBinEnv:      map[string]string{},
 		proxiedSUMDBs: map[string]string{},
 	}
+	op := &option{}
+	for _, opt := range options {
+		opt(op)
+	}
+	if op.discardEnv {
+		gp.GoBinEnv = []string{}
+	}
+	return gp
 }
 
 func moduleEnv() []string {
 	return []string{
-		os.Getenv("GOPROXY"),
-		os.Getenv("GONOPROXY"),
-		os.Getenv("GOSUMDB"),
-		os.Getenv("GONOSUMDB"),
-		os.Getenv("GOPRIVATE"),
+		"GOPROXY=" + os.Getenv("GOPROXY"),
+		"GONOPROXY=" + os.Getenv("GONOPROXY"),
+		"GOSUMDB=" + os.Getenv("GOSUMDB"),
+		"GONOSUMDB=" + os.Getenv("GONOSUMDB"),
+		"GOPRIVATE=" + os.Getenv("GOPRIVATE"),
 	}
 }
 
